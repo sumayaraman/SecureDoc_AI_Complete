@@ -1,0 +1,10 @@
+.vscode/ 
+__pycache__/ 
+*.pyc 
+venv/ 
+.env 
+*.db 
+*.sqlite3 
+node_modules/ 
+.next/ 
+.env.local 

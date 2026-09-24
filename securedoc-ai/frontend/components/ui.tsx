@@ -1,0 +1,5 @@
+'use client'
+import {ReactNode} from 'react'
+export function Card({children,className=''}:{children:ReactNode,className?:string}){return <div className={`rounded-2xl border border-slate-200 bg-white shadow-soft ${className}`}>{children}</div>}
+export function Badge({children,tone='slate'}:{children:ReactNode,tone?:'green'|'amber'|'red'|'blue'|'slate'}){const c={green:'bg-emerald-50 text-emerald-700',amber:'bg-amber-50 text-amber-700',red:'bg-rose-50 text-rose-700',blue:'bg-indigo-50 text-indigo-700',slate:'bg-slate-100 text-slate-600'}[tone];return <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${c}`}>{children}</span>}
+export function Button({children,variant='primary',className='',...props}:any){return <button className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${variant==='primary'?'bg-indigo-600 text-white hover:bg-indigo-700':'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'} ${className}`} {...props}>{children}</button>}

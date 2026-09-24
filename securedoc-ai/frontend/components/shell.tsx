@@ -1,0 +1,3 @@
+'use client';
+import {ReactNode,useEffect,useState} from 'react';import {usePathname,useRouter} from 'next/navigation';import {Sidebar} from './sidebar';import {Header} from './header';
+export function Shell({children}:{children:ReactNode}){const r=useRouter(),path=usePathname(),[ready,setReady]=useState(false);useEffect(()=>{if(!localStorage.getItem('securedoc_token'))r.replace('/login');else setReady(true)},[r,path]);if(!ready)return <div className="min-h-screen grid place-items-center text-sm text-slate-500">Loading SecureDoc AI...</div>;return <div className="min-h-screen lg:flex"><Sidebar/><div className="min-w-0 flex-1"><Header/><main className="mx-auto max-w-[1500px] p-4 sm:p-6">{children}</main></div></div>}
