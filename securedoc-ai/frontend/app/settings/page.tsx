@@ -1,2 +1,36 @@
-'use client';import {Shell} from '../../components/shell';import {Card,Button,Badge} from '../../components/ui';import {User,Building2,Users,Shield,Database,ChevronRight} from 'lucide-react'
-const items=[[User,'Profile','Manage your personal information'],[Building2,'Organization','Acme Trading Ltd.'],[Users,'Team management','4 members · role-based access'],[Shield,'Security','Authentication and session settings'],[Database,'Data management','Export or delete workspace data']];export default function Settings(){return <Shell><div><h1 className="text-2xl font-bold">Settings</h1><p className="mt-1 text-sm text-slate-500">Manage your workspace, team, security and data.</p></div><div className="mt-6 grid gap-4 lg:grid-cols-[1fr_320px]"><Card className="divide-y divide-slate-100">{items.map(([I,t,d])=><button className="flex w-full items-center gap-4 p-5 text-left hover:bg-slate-50" key={t}><div className="grid h-10 w-10 place-items-center rounded-xl bg-slate-100"><I size={18}/></div><div className="flex-1"><div className="text-sm font-semibold">{t}</div><div className="mt-1 text-xs text-slate-500">{d}</div></div><ChevronRight size={17} className="text-slate-300"/></button>)}</Card><Card className="p-5"><Badge tone="blue">Demo Workspace</Badge><h2 className="mt-4 font-bold">Acme Trading Ltd.</h2><p className="mt-2 text-sm leading-6 text-slate-500">Your demo workspace keeps sample records separate from future real organization data.</p><div className="mt-5 border-t border-slate-100 pt-5"><div className="text-xs text-slate-400">Current role</div><div className="mt-1 font-semibold">Owner</div></div><Button variant="secondary" className="mt-5 w-full">Workspace settings</Button></Card></div></Shell>}
+'use client';
+import { Shell } from '../../components/shell';
+import { Card, Button } from '../../components/ui';
+import { User, Building2, Bell, Shield } from 'lucide-react';
+
+const items = [
+  [User, 'Profile', 'Manage your personal information'],
+  [Building2, 'Organization', 'Update company details'],
+  [Bell, 'Notifications', 'Configure alert preferences'],
+  [Shield, 'Security', 'Password and 2FA settings'],
+];
+
+export default function Settings() {
+  return (
+    <Shell>
+      <div>
+        <p className="text-sm font-medium text-indigo-600">Configuration</p>
+        <h1 className="mt-1 text-2xl font-bold">Settings</h1>
+      </div>
+      <div className="mt-6 grid gap-4">
+        {items.map(([Icon, title, desc]: any) => (
+          <Card key={title} className="flex items-center gap-4 p-5">
+            <div className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
+              <Icon size={20} />
+            </div>
+            <div className="flex-1">
+              <p className="font-medium">{title}</p>
+              <p className="text-sm text-slate-500">{desc}</p>
+            </div>
+            <Button variant="outline" size="sm">Manage</Button>
+          </Card>
+        ))}
+      </div>
+    </Shell>
+  );
+}
