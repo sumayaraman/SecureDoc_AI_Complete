@@ -1,3 +1,46 @@
 'use client';
 import {useState} from 'react';import {useRouter} from 'next/navigation';import Link from 'next/link';import {api} from '../../lib/api';
-export default function Register(){const [name,setName]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(''),[org,setOrg]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);const r=useRouter();async function submit(e:any){e.preventDefault();setBusy(true);try{const d=await api('/auth/register',{method:'POST',body:JSON.stringify({name,email,password,organization_name:org||'My Organization'})});localStorage.setItem('securedoc_token',d.token);r.push('/dashboard')}catch(e:any){setError(e.message)}finally{setBusy(false)}}return <main className="min-h-screen bg-slate-50 grid place-items-center p-6"><form onSubmit={submit} className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm"><h1 className="text-2xl font-bold">Create your workspace</h1><p className="mt-1 text-sm text-slate-500">Start with a private SecureDoc AI workspace.</p>{[['Name',name,setName,'text'],['Email',email,setEmail,'email'],['Organization',org,setOrg,'text'],['Password',password,setPassword,'password']].map(([l,v,s,t]:any)=><label key={l} className="mt-4 block text-sm font-medium">{l}<input required type={t} className="mt-2 w-full rounded-xl border p-3" value={v} onChange={e=>s(e.target.value)}/></label>)}{error&&<p className="mt-3 text-sm text-red-600">{error}</p>}<button disabled={busy} className="mt-6 w-full rounded-xl bg-indigo-600 p-3 font-semibold text-white">{busy?'Creating...':'Create account'}</button><p className="mt-5 text-center text-sm text-slate-500">Already registered? <Link className="font-semibold text-indigo-600" href="/login">Sign in</Link></p></form></main>}
+export default function Register(){
+  const [name,setName]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(''),[org,setOrg]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const r=useRouter();
+  async function submit(e:any){
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try{
+      const d=await api('/auth/register',{method:'POST',body:JSON.stringify({name,email,password,organization_name:org||'My Organization'})});
+      localStorage.setItem('securedoc_token',d.token);
+      r.push('/dashboard');
+    }catch(e:any){
+      setError(e.message || 'Registration failed');
+    }finally{
+      setBusy(false);
+    }
+  }
+  return (
+    <main className="min-h-screen bg-slate-50 grid place-items-center p-6">
+      <form onSubmit={submit} className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+        <h1 className="text-2xl font-bold">Create your workspace</h1>
+        <p className="mt-1 text-sm text-slate-500">Start with a private SecureDoc AI workspace.</p>
+        {[['Name',name,setName,'text'],['Email',email,setEmail,'email'],['Organization',org,setOrg,'text'],['Password',password,setPassword,'password']].map(([l,v,s,t]:any)=>(
+          <label key={l} className="mt-4 block text-sm font-medium">
+            {l}
+            <input required type={t} className="mt-2 w-full rounded-xl border p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500" value={v} onChange={e=>s(e.target.value)}/>
+          </label>
+        ))}
+        {error && <p className="mt-3 text-sm text-red-600 bg-red-50 p-3 rounded-xl border border-red-200">{error}</p>}
+        <button disabled={busy} className="mt-6 w-full rounded-xl bg-indigo-600 p-3 font-semibold text-white disabled:opacity-60 transition-opacity">
+          {busy ? 'Creating workspace...' : 'Create account'}
+        </button>
+        {busy && (
+          <p className="mt-2 text-center text-xs text-slate-400 animate-pulse">
+            Connecting to server. Free-tier backends may take up to a minute to wake up...
+          </p>
+        )}
+        <p className="mt-5 text-center text-sm text-slate-500">
+          Already registered? <Link className="font-semibold text-indigo-600" href="/login">Sign in</Link>
+        </p>
+      </form>
+    </main>
+  );
+}

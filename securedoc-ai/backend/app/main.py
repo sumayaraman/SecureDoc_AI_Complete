@@ -10,8 +10,15 @@ from app.security.auth import hash_password
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='SecureDoc AI API',version='1.1.0')
-origins=[x.strip() for x in os.getenv('CORS_ORIGINS','http://localhost:3000,http://127.0.0.1:3000').split(',') if x.strip()]
-app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
+origins = [x.strip() for x in os.getenv('CORS_ORIGINS', '').split(',') if x.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_origin_regex=r"^https?:\/\/.*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 _hits=defaultdict(deque)
 @app.middleware('http')
 async def security_middleware(request:Request,call_next):
