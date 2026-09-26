@@ -9,7 +9,7 @@ from app.models.entities import Base,User,Organization,OrganizationMember
 from app.security.auth import hash_password
 
 Base.metadata.create_all(bind=engine)
-app=FastAPI(title='SecureDoc AI API',version='1.1.0')
+app=FastAPI(title='SecureDoc AI API',version='1.1.1')
 origins = [x.strip() for x in os.getenv('CORS_ORIGINS', '').split(',') if x.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -38,4 +38,4 @@ def seed_demo():
     finally: db.close()
 seed_demo()
 @app.get('/health')
-def health(): return {'status':'ok','service':'securedoc-ai-api','version':'1.1.0'}
+def health(): return {'status':'ok','service':'securedoc-ai-api','version':'1.1.1'}
