@@ -106,23 +106,29 @@ export default function Upload() {
                 ...i,
                 status: 'extracting',
                 stageText: i.isExcel
-                  ? 'Extracting sheets, rows & cell data...'
+                  ? 'Reading workbook & detecting invoice structure...'
                   : 'Extracting text and OCR...',
               }
             : i
         )
       );
-    }, 900);
+    }, 800);
 
     timer2 = setTimeout(() => {
       setItems(curr =>
         curr.map(i =>
           i.id === item.id && (i.status === 'extracting' || i.status === 'validating')
-            ? { ...i, status: 'validating', stageText: 'AI analyzing fields & validating calculations...' }
+            ? {
+                ...i,
+                status: 'validating',
+                stageText: i.isExcel
+                  ? 'Extracting line items, validating totals & checking duplicates...'
+                  : 'AI analyzing fields & validating calculations...',
+              }
             : i
         )
       );
-    }, 2200);
+    }, 1900);
 
     try {
       const data = await uploadFile(item.file);
@@ -328,10 +334,22 @@ export default function Upload() {
                             <div className="h-12 w-12 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center mb-2 shadow-sm">
                               <FileSpreadsheet size={28} />
                             </div>
-                            <span className="text-xs font-semibold text-emerald-950">
-                              {item.file.name.toLowerCase().endsWith('.csv') ? 'CSV Spreadsheet' : 'Excel Spreadsheet'}
+                            <span className="text-xs font-bold text-emerald-950">
+                              📊 Excel Invoice
                             </span>
-                            <span className="text-[11px] text-emerald-700/80 mt-0.5">Rows & line items detected</span>
+                            <span className="text-[11px] text-emerald-700 mt-0.5">
+                              {item.file.name.toLowerCase().endsWith('.csv') ? 'CSV Spreadsheet' : 'Excel Workbook (.xlsx)'}
+                            </span>
+                            {item.result?.sheet_name && (
+                              <span className="mt-2 inline-flex items-center rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                                Sheet: {item.result.sheet_name}
+                              </span>
+                            )}
+                            {item.result?.items && item.result.items.length > 0 && (
+                              <span className="mt-1 text-[10px] text-emerald-700 font-medium">
+                                {item.result.items.length} line items extracted
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <div className="h-48 w-full rounded-xl border border-slate-200 bg-white p-4 flex flex-col items-center justify-center text-center">
@@ -427,7 +445,7 @@ export default function Upload() {
                                   : 'text-slate-700 font-medium'
                               }
                             >
-                              {item.isExcel ? 'Spreadsheet rows & cell data extraction' : 'Text extraction & OCR scanning'}
+                              {item.isExcel ? 'Reading workbook & detecting invoice structure' : 'Text extraction & OCR scanning'}
                             </span>
                           </div>
 
@@ -447,7 +465,7 @@ export default function Upload() {
                                   : 'text-slate-400'
                               }
                             >
-                              AI field extraction, mathematical validation & duplicate check
+                              {item.isExcel ? 'Extracting line items, validating totals & duplicate check' : 'AI field extraction, mathematical validation & duplicate check'}
                             </span>
                           </div>
                         </div>
@@ -464,9 +482,16 @@ export default function Upload() {
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2 text-emerald-600 font-bold text-base">
                             <CheckCircle2 size={22} className="text-emerald-500" />
-                            <span>Invoice processed successfully</span>
+                            <span>{item.isExcel ? 'Excel invoice processed successfully' : 'Invoice processed successfully'}</span>
                           </div>
-                          <Badge tone="green">PROCESSED</Badge>
+                          <div className="flex items-center gap-2">
+                            {item.isExcel && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
+                                📊 Excel Invoice
+                              </span>
+                            )}
+                            <Badge tone="green">PROCESSED</Badge>
+                          </div>
                         </div>
 
                         {/* Extracted Details Grid */}
@@ -676,18 +701,37 @@ export default function Upload() {
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2 text-slate-700 font-bold text-base">
                             <FileX size={22} className="text-slate-500" />
-                            <span>Unsupported Document</span>
+                            <span>{item.isExcel ? 'Unsupported Spreadsheet' : 'Unsupported Document'}</span>
                           </div>
                           <Badge tone="slate">UNSUPPORTED</Badge>
                         </div>
 
-                        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs text-slate-700 space-y-1">
-                          <p className="font-bold text-slate-800">
-                            {item.result?.message || "We couldn't identify this file as a supported invoice or receipt."}
+                        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs text-slate-700 space-y-2">
+                          <p className="font-bold text-slate-800 text-sm">
+                            {item.result?.message || (item.isExcel
+                              ? "This Excel file could be opened successfully, but we couldn't identify it as an invoice."
+                              : "We couldn't identify this file as a supported invoice or receipt.")}
                           </p>
-                          <p className="text-slate-500">
-                            SecureDoc AI is specialized for processing business invoices, bills, and purchase receipts. Non-billing files (such as CVs, general articles, or unformatted text) are not recorded as invoices.
-                          </p>
+                          {item.isExcel ? (
+                            <div className="space-y-1.5 pt-1">
+                              <p className="flex items-center gap-1.5 text-emerald-700 font-semibold">
+                                <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                                <span>File format supported (.xlsx / .xls)</span>
+                              </p>
+                              <p className="text-slate-600 leading-relaxed">
+                                SecureDoc AI can read this workbook, but the spreadsheet does not contain billing information (such as an invoice number, vendor, or itemized pricing table). Arbitrary datasets, website monitoring, employee logs, or random spreadsheets are not recorded as invoices.
+                              </p>
+                              {item.result?.details && (
+                                <p className="text-[11px] text-slate-500 italic mt-1 bg-white p-2 rounded-lg border border-slate-200/60">
+                                  {item.result.details}
+                                </p>
+                              )}
+                            </div>
+                          ) : (
+                            <p className="text-slate-500">
+                              SecureDoc AI is specialized for processing business invoices, bills, and purchase receipts. Non-billing files (such as CVs, general articles, or unformatted text) are not recorded as invoices.
+                            </p>
+                          )}
                         </div>
 
                         <div className="pt-2">

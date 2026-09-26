@@ -12,6 +12,7 @@ from app.models.entities import *
 from app.security.auth import hash_password, verify_password, make_token, current_context, require_role
 from app.services.ai import AIService
 from app.services.extractor import extract_text, classify_document
+from app.services.excel_service import extract_excel_invoice_data
 from app.services.validation import validate_invoice
 
 router=APIRouter(); STORAGE=Path(os.getenv('STORAGE_DIR','./storage')).resolve(); STORAGE.mkdir(parents=True,exist_ok=True)
@@ -76,32 +77,64 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
     key=f'{m.organization_id}/{digest}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
     doc=Document(organization_id=m.organization_id,filename=file.filename or 'document',mime_type=file.content_type,storage_key=key,file_hash=digest,status='PROCESSING'); db.add(doc); db.flush(); job=ProcessingJob(document_id=doc.id,status='PROCESSING',stage='TEXT_EXTRACTION'); db.add(job); db.commit()
     try:
-        text=extract_text(str(path),file.content_type,file.filename or 'document'); doc.extracted_text=text[:200000]
-        classification = classify_document(text, file.filename or 'document')
-        if not classification['is_supported']:
-            doc.status = 'UNSUPPORTED'
-            job.stage = 'DOCUMENT_TYPE_DETECTION'
-            job.status = 'FAILED'
-            job.error_message = classification.get('reason', 'Unsupported document type')
-            db.commit()
-            return {
-                'status': 'UNSUPPORTED',
-                'document_id': doc.id,
-                'filename': doc.filename,
-                'document_type': classification.get('doc_type', 'unsupported'),
-                'message': classification.get('reason', "We couldn't identify this file as a supported invoice or receipt."),
-                'created_at': doc.created_at.isoformat()
-            }
+        is_excel = suffix in ('.xlsx', '.xls')
+        if is_excel:
+            job.stage = 'EXCEL_EXTRACTION'
+            excel_res = extract_excel_invoice_data(str(path), file.filename or 'document')
+            if not excel_res.get('is_supported'):
+                doc.status = 'UNSUPPORTED' if excel_res.get('status') != 'FAILED' else 'FAILED'
+                job.stage = 'DOCUMENT_TYPE_DETECTION' if doc.status == 'UNSUPPORTED' else 'FILE_VALIDATION'
+                job.status = 'FAILED'
+                job.error_message = excel_res.get('message', "This Excel file could be opened successfully, but we couldn't identify it as an invoice.")
+                db.commit()
+                return {
+                    'status': doc.status,
+                    'document_id': doc.id,
+                    'filename': doc.filename,
+                    'document_type': excel_res.get('doc_type', 'unsupported_spreadsheet'),
+                    'message': excel_res.get('message', "This Excel file could be opened successfully, but we couldn't identify it as an invoice."),
+                    'details': excel_res.get('details'),
+                    'created_at': doc.created_at.isoformat()
+                }
+            text = excel_res.get('full_text', '')
+            doc.extracted_text = text[:200000]
+            classification = {'is_supported': True, 'doc_type': 'excel_invoice', 'confidence': excel_res.get('confidence', 95.0)}
+            result = validate_result_payload(excel_res)
+        else:
+            text=extract_text(str(path),file.content_type,file.filename or 'document'); doc.extracted_text=text[:200000]
+            classification = classify_document(text, file.filename or 'document')
+            if not classification['is_supported']:
+                doc.status = 'UNSUPPORTED'
+                job.stage = 'DOCUMENT_TYPE_DETECTION'
+                job.status = 'FAILED'
+                job.error_message = classification.get('reason', 'Unsupported document type')
+                db.commit()
+                return {
+                    'status': 'UNSUPPORTED',
+                    'document_id': doc.id,
+                    'filename': doc.filename,
+                    'document_type': classification.get('doc_type', 'unsupported'),
+                    'message': classification.get('reason', "We couldn't identify this file as a supported invoice or receipt."),
+                    'created_at': doc.created_at.isoformat()
+                }
 
-        job.stage='AI_EXTRACTION'
-        result=validate_result_payload(await AIService().extract_invoice(text,file.filename or 'invoice'))
+            job.stage='AI_EXTRACTION'
+            result=validate_result_payload(await AIService().extract_invoice(text,file.filename or 'invoice'))
+
         job.stage='VALIDATION'
-        validation=validate_invoice(result.get('items',[]),Decimal(str(result.get('subtotal',0))),Decimal(str(result.get('discount',0))),Decimal(str(result.get('tax',0))),Decimal(str(result.get('total',0))))
+        validation=validate_invoice(
+            result.get('items',[]),
+            Decimal(str(result.get('subtotal',0))),
+            Decimal(str(result.get('discount',0))),
+            Decimal(str(result.get('tax',0))),
+            Decimal(str(result.get('total',0))),
+            Decimal(str(result.get('shipping',0) or 0))
+        )
         inv=Invoice(organization_id=m.organization_id,document_id=doc.id,invoice_number=result.get('invoice_number'),vendor_name=result.get('vendor_name'),invoice_date=result.get('invoice_date'),due_date=result.get('due_date'),subtotal=result.get('subtotal',0),discount=result.get('discount',0),tax=result.get('tax',0),total=result.get('total',0),currency=result.get('currency','BDT'),confidence=result.get('confidence',0),status='PROCESSED'); db.add(inv); db.flush()
         for item in result['items']:
             try: db.add(InvoiceItem(invoice_id=inv.id,description=str(item.get('description','Unknown item'))[:500],quantity=float(item.get('quantity',0) or 0),unit_price=float(item.get('unit_price',0) or 0),total=float(item.get('total',0) or 0)))
             except Exception: pass
-        vr=ValidationResult(invoice_id=inv.id,valid=validation['valid'],difference=float(validation['difference']),message='Validated successfully' if validation['valid'] else 'Calculation mismatch requires review'); db.add(vr); inv.validation_difference=float(validation['difference'])
+        vr=ValidationResult(invoice_id=inv.id,valid=validation['valid'],difference=float(validation['difference']),message=validation.get('message', 'Validated successfully' if validation['valid'] else 'Calculation mismatch requires review')); db.add(vr); inv.validation_difference=float(validation['difference'])
         
         review_reasons = []
         if not text.strip():
@@ -110,7 +143,7 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
             review_reasons.append(f'Calculation mismatch of {validation["difference"]} {inv.currency or "BDT"}')
         if inv.confidence < 85:
             review_reasons.append(f'Extraction confidence is {inv.confidence:.0f}% (below 85% threshold)')
-        if not inv.invoice_number:
+        if not inv.invoice_number or inv.invoice_number.lower() in ('unknown', 'n/a', 'none', ''):
             review_reasons.append('Missing invoice number')
         if not inv.vendor_name or inv.vendor_name.lower() in ('unknown vendor', 'unknown'):
             review_reasons.append('Vendor name could not be identified with certainty')
@@ -118,10 +151,12 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
         if review_reasons:
             inv.status = 'NEEDS_REVIEW'
 
-        dup=db.query(Invoice).filter(Invoice.organization_id==m.organization_id,Invoice.invoice_number==inv.invoice_number,Invoice.id!=inv.id).first()
-        if dup:
-            inv.duplicate=True
-            inv.status='DUPLICATE'
+        dup = None
+        if inv.invoice_number and inv.invoice_number.lower() not in ('unknown', 'n/a', 'none', ''):
+            dup=db.query(Invoice).filter(Invoice.organization_id==m.organization_id,Invoice.invoice_number==inv.invoice_number,Invoice.id!=inv.id).first()
+            if dup:
+                inv.duplicate=True
+                inv.status='DUPLICATE'
 
         doc.status=inv.status; job.stage='COMPLETED'; job.status='COMPLETED'; job.completed_at=datetime.utcnow()
         db.add(Notification(organization_id=m.organization_id,user_id=u.id,title='Invoice processed',message=f'{doc.filename} is ready for review.')); db.commit()
@@ -132,7 +167,7 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
         return {
             **serialize_invoice(inv,doc),
             'invoice_id': inv.id,
-            'document_type': classification.get('doc_type', 'invoice'),
+            'document_type': 'excel_invoice' if is_excel else classification.get('doc_type', 'invoice'),
             'review_reasons': review_reasons,
             'validation': {'valid': vr.valid, 'difference': float(vr.difference), 'message': vr.message},
             'items': items_serialized,
