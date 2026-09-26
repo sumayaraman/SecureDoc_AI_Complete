@@ -363,19 +363,20 @@ def extract_excel_invoice_data(file_path: str, filename: str) -> Dict[str, Any]:
     # Check cell-by-cell first for exact labeled cell
     for r in grid[:25]:
         for c_idx, cell in enumerate(r):
-            cs = clean_cell_str(cell).lower().strip()
+            raw_val = clean_cell_str(cell)
+            cs = raw_val.lower().strip()
             if any(k == cs or cs.startswith(k) for k in ['invoice no', 'invoice #', 'invoice number', 'inv no', 'inv #', 'bill no', 'bill number']):
-                # Check if value is in same cell e.g. "Invoice Number: INV-001"
-                m_same = re.search(r'[:#|–-]?\s*([A-Za-z0-9/_-]{3,})', clean_cell_str(cell))
+                # Check if value is in same cell e.g. "Invoice Number: INV-2026-001"
+                m_same = re.search(r'(?:invoice\s*(?:no\.?|number|#)?|inv\s*(?:no\.?|#)?|bill\s*no\.?)\s*[:#|–-]\s*([A-Za-z0-9/_-]{3,})', raw_val, re.I)
+                if m_same and m_same.group(1).lower() not in ('date', 'due', 'number', 'no'):
+                    invoice_number = m_same.group(1).strip()
+                    break
                 # Check next column
                 if c_idx + 1 < len(r) and r[c_idx + 1] is not None:
                     val = clean_cell_str(r[c_idx + 1])
-                    if val and len(val) >= 2 and val.lower() not in ('date', 'due'):
+                    if val and len(val) >= 2 and val.lower() not in ('date', 'due', 'number', 'no'):
                         invoice_number = val
                         break
-                elif m_same and len(m_same.group(1)) >= 3:
-                    invoice_number = m_same.group(1)
-                    break
         if invoice_number:
             break
 
