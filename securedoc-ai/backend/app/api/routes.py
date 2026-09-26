@@ -72,14 +72,43 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
     if file.content_type not in ALLOWED and suffix not in ALLOWED_EXT: raise HTTPException(400,'Only PDF, JPG, PNG, Excel (.xlsx, .xls) and CSV files are supported')
     data=await file.read()
     if len(data)>MAX: raise HTTPException(413,'Maximum file size is 10 MB')
-    digest=hashlib.sha256(data).hexdigest(); existing=db.query(Document).filter_by(organization_id=m.organization_id,file_hash=digest).first()
-    if existing: raise HTTPException(409,'This file already exists in the workspace')
+    digest=hashlib.sha256(data).hexdigest()
+    existing=db.query(Document).filter_by(organization_id=m.organization_id,file_hash=digest).first()
+    if existing:
+        existing_inv = db.query(Invoice).filter_by(document_id=existing.id).first()
+        job = db.query(ProcessingJob).filter_by(document_id=existing.id).order_by(ProcessingJob.created_at.desc()).first()
+        return {
+            'status': 'DUPLICATE',
+            'duplicate': True,
+            'id': existing_inv.id if existing_inv else existing.id,
+            'document_id': existing.id,
+            'processing_job_id': job.id if job else None,
+            'filename': existing.filename,
+            'document_type': 'excel_invoice' if suffix in ('.xlsx', '.xls') else 'invoice',
+            'invoice_number': existing_inv.invoice_number if existing_inv else None,
+            'vendor': existing_inv.vendor_name if existing_inv else None,
+            'amount': float(existing_inv.total or 0) if existing_inv else 0.0,
+            'currency': existing_inv.currency if existing_inv else 'USD',
+            'invoice_id': existing_inv.id if existing_inv else None,
+            'duplicate_of': existing_inv.id if existing_inv else existing.id,
+            'duplicate_invoice_number': existing_inv.invoice_number if existing_inv else None,
+            'duplicate_vendor': existing_inv.vendor_name if existing_inv else None,
+            'duplicate_total': float(existing_inv.total or 0) if existing_inv else None,
+            'duplicate_date': existing_inv.invoice_date if existing_inv else None,
+            'message': f'Exact duplicate file already exists in your workspace: {existing.filename}',
+            'created_at': existing.created_at.isoformat()
+        }
     key=f'{m.organization_id}/{digest}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
-    doc=Document(organization_id=m.organization_id,filename=file.filename or 'document',mime_type=file.content_type,storage_key=key,file_hash=digest,status='PROCESSING'); db.add(doc); db.flush(); job=ProcessingJob(document_id=doc.id,status='PROCESSING',stage='TEXT_EXTRACTION'); db.add(job); db.commit()
+    is_excel = suffix in ('.xlsx', '.xls')
+    initial_stage = 'READING_WORKBOOK' if is_excel else 'TEXT_EXTRACTION'
+    doc=Document(organization_id=m.organization_id,filename=file.filename or 'document',mime_type=file.content_type,storage_key=key,file_hash=digest,status='PROCESSING')
+    db.add(doc); db.flush()
+    job=ProcessingJob(document_id=doc.id,status='PROCESSING',stage=initial_stage)
+    db.add(job); db.commit()
     try:
-        is_excel = suffix in ('.xlsx', '.xls')
         if is_excel:
-            job.stage = 'EXCEL_EXTRACTION'
+            job.stage = 'DETECTING_STRUCTURE'
+            db.commit()
             excel_res = extract_excel_invoice_data(str(path), file.filename or 'document')
             if not excel_res.get('is_supported'):
                 doc.status = 'UNSUPPORTED' if excel_res.get('status') != 'FAILED' else 'FAILED'
@@ -90,18 +119,26 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
                 return {
                     'status': doc.status,
                     'document_id': doc.id,
+                    'processing_job_id': job.id,
+                    'id': doc.id,
                     'filename': doc.filename,
                     'document_type': excel_res.get('doc_type', 'unsupported_spreadsheet'),
                     'message': excel_res.get('message', "This Excel file could be opened successfully, but we couldn't identify it as an invoice."),
                     'details': excel_res.get('details'),
                     'created_at': doc.created_at.isoformat()
                 }
+            job.stage = 'EXTRACTING_DATA'
+            db.commit()
             text = excel_res.get('full_text', '')
             doc.extracted_text = text[:200000]
             classification = {'is_supported': True, 'doc_type': 'excel_invoice', 'confidence': excel_res.get('confidence', 95.0)}
             result = validate_result_payload(excel_res)
         else:
+            job.stage = 'TEXT_EXTRACTION'
+            db.commit()
             text=extract_text(str(path),file.content_type,file.filename or 'document'); doc.extracted_text=text[:200000]
+            job.stage = 'DOCUMENT_TYPE_DETECTION'
+            db.commit()
             classification = classify_document(text, file.filename or 'document')
             if not classification['is_supported']:
                 doc.status = 'UNSUPPORTED'
@@ -112,6 +149,8 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
                 return {
                     'status': 'UNSUPPORTED',
                     'document_id': doc.id,
+                    'processing_job_id': job.id,
+                    'id': doc.id,
                     'filename': doc.filename,
                     'document_type': classification.get('doc_type', 'unsupported'),
                     'message': classification.get('reason', "We couldn't identify this file as a supported invoice or receipt."),
@@ -119,9 +158,11 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
                 }
 
             job.stage='AI_EXTRACTION'
+            db.commit()
             result=validate_result_payload(await AIService().extract_invoice(text,file.filename or 'invoice'))
 
-        job.stage='VALIDATION'
+        job.stage='VALIDATING_TOTALS'
+        db.commit()
         validation=validate_invoice(
             result.get('items',[]),
             Decimal(str(result.get('subtotal',0))),
@@ -151,6 +192,8 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
         if review_reasons:
             inv.status = 'NEEDS_REVIEW'
 
+        job.stage = 'CHECKING_DUPLICATES'
+        db.commit()
         dup = None
         if inv.invoice_number and inv.invoice_number.lower() not in ('unknown', 'n/a', 'none', ''):
             dup=db.query(Invoice).filter(Invoice.organization_id==m.organization_id,Invoice.invoice_number==inv.invoice_number,Invoice.id!=inv.id).first()
@@ -166,7 +209,10 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
         
         return {
             **serialize_invoice(inv,doc),
+            'id': inv.id,
             'invoice_id': inv.id,
+            'document_id': doc.id,
+            'processing_job_id': job.id,
             'document_type': 'excel_invoice' if is_excel else classification.get('doc_type', 'invoice'),
             'review_reasons': review_reasons,
             'validation': {'valid': vr.valid, 'difference': float(vr.difference), 'message': vr.message},
@@ -179,7 +225,65 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
             'processing': {'status': job.status, 'stage': job.stage, 'error': job.error_message}
         }
     except Exception as e:
-        db.rollback(); doc=db.get(Document,doc.id); job=db.get(ProcessingJob,job.id); doc.status='FAILED'; job.status='FAILED'; job.stage='FAILED'; job.error_message=str(e)[:500]; db.commit(); raise HTTPException(500,f'Document processing failed: {str(e)[:200]}')
+        db.rollback()
+        doc=db.get(Document,doc.id)
+        job=db.get(ProcessingJob,job.id)
+        doc.status='FAILED'; job.status='FAILED'; job.stage='FAILED'; job.error_message=str(e)[:500]; db.commit()
+        return {
+            'status': 'FAILED',
+            'document_id': doc.id,
+            'processing_job_id': job.id,
+            'id': doc.id,
+            'filename': doc.filename,
+            'document_type': 'unsupported',
+            'message': 'We couldn\'t process this document.',
+            'error': str(e)[:200]
+        }
+
+@router.get('/documents/{document_id}/status')
+def document_status(document_id:int,authorization:str|None=Header(None),db:Session=Depends(get_db)):
+    u,m=current_context(db,authorization)
+    doc=db.query(Document).filter_by(id=document_id,organization_id=m.organization_id).first()
+    if not doc: raise HTTPException(404,'Document not found')
+    job=db.query(ProcessingJob).filter_by(document_id=doc.id).order_by(ProcessingJob.created_at.desc()).first()
+    inv=db.query(Invoice).filter_by(document_id=doc.id).first()
+    
+    stage = job.stage if job else 'COMPLETED'
+    job_status = job.status if job else doc.status
+    error_msg = job.error_message if job else None
+    
+    res = {
+        'document_id': doc.id,
+        'processing_job_id': job.id if job else None,
+        'id': inv.id if inv else doc.id,
+        'status': doc.status,
+        'stage': stage,
+        'filename': doc.filename,
+        'error_message': error_msg,
+        'created_at': doc.created_at.isoformat(),
+    }
+    
+    if inv:
+        res.update(serialize_invoice(inv, doc))
+        res['invoice_id'] = inv.id
+        vr = db.query(ValidationResult).filter_by(invoice_id=inv.id).first()
+        items = db.query(InvoiceItem).filter_by(invoice_id=inv.id).all()
+        res['validation'] = {'valid': vr.valid, 'difference': float(vr.difference), 'message': vr.message} if vr else None
+        res['items'] = [{'id': x.id, 'description': x.description, 'quantity': float(x.quantity), 'unit_price': float(x.unit_price), 'total': float(x.total)} for x in items]
+    elif doc.status == 'UNSUPPORTED':
+        res['document_type'] = 'unsupported_spreadsheet' if doc.filename.endswith(('.xlsx', '.xls')) else 'unsupported'
+        res['message'] = error_msg or "This file could not be identified as an invoice."
+    elif doc.status == 'FAILED':
+        res['message'] = error_msg or "Processing failed."
+        
+    return res
+
+@router.get('/processing-jobs/{job_id}')
+def processing_job_status(job_id:int,authorization:str|None=Header(None),db:Session=Depends(get_db)):
+    u,m=current_context(db,authorization)
+    job=db.get(ProcessingJob, job_id)
+    if not job: raise HTTPException(404, 'Job not found')
+    return document_status(job.document_id, authorization, db)
 
 @router.get('/documents')
 def documents(q:str|None=None,status:str|None=None,authorization:str|None=Header(None),db:Session=Depends(get_db)):

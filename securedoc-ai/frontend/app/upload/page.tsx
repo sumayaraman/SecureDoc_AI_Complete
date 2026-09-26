@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { Shell } from '../../components/shell';
 import { Card, Badge } from '../../components/ui';
-import { uploadFile } from '../../lib/api';
+import { uploadFile, getDocumentStatus } from '../../lib/api';
 import {
   UploadCloud,
   CheckCircle2,
@@ -39,6 +39,7 @@ interface UploadItem {
     | 'unsupported'
     | 'failed';
   stageText: string;
+  backendStage?: string;
   error?: string;
   result?: any;
 }
@@ -94,47 +95,7 @@ export default function Upload() {
   }
 
   async function executeUpload(item: UploadItem) {
-    // Step simulation in parallel with real backend processing
-    let timer1: any;
-    let timer2: any;
-
-    timer1 = setTimeout(() => {
-      setItems(curr =>
-        curr.map(i =>
-          i.id === item.id && (i.status === 'uploading' || i.status === 'extracting')
-            ? {
-                ...i,
-                status: 'extracting',
-                stageText: i.isExcel
-                  ? 'Reading workbook & detecting invoice structure...'
-                  : 'Extracting text and OCR...',
-              }
-            : i
-        )
-      );
-    }, 800);
-
-    timer2 = setTimeout(() => {
-      setItems(curr =>
-        curr.map(i =>
-          i.id === item.id && (i.status === 'extracting' || i.status === 'validating')
-            ? {
-                ...i,
-                status: 'validating',
-                stageText: i.isExcel
-                  ? 'Extracting line items, validating totals & checking duplicates...'
-                  : 'AI analyzing fields & validating calculations...',
-              }
-            : i
-        )
-      );
-    }, 1900);
-
-    try {
-      const data = await uploadFile(item.file);
-      clearTimeout(timer1);
-      clearTimeout(timer2);
-
+    const applyFinalResult = (data: any) => {
       const normalizedStatus = String(data.status || '').toUpperCase();
       let targetStatus: UploadItem['status'] = 'completed';
 
@@ -144,6 +105,8 @@ export default function Upload() {
         targetStatus = 'duplicate';
       } else if (normalizedStatus === 'NEEDS_REVIEW') {
         targetStatus = 'review_required';
+      } else if (normalizedStatus === 'FAILED') {
+        targetStatus = 'failed';
       } else {
         targetStatus = 'completed';
       }
@@ -154,16 +117,116 @@ export default function Upload() {
             ? {
                 ...i,
                 status: targetStatus,
-                stageText: 'Processing completed',
+                stageText:
+                  targetStatus === 'failed'
+                    ? (data.message || data.error || 'Processing failed')
+                    : 'Processing completed',
+                error: targetStatus === 'failed' ? (data.message || data.error || 'Processing failed') : undefined,
                 result: data,
+                backendStage: data.stage || 'COMPLETED',
               }
             : i
         )
       );
-    } catch (err: any) {
-      clearTimeout(timer1);
-      clearTimeout(timer2);
+    };
 
+    try {
+      // 1. Send real upload request to backend
+      const uploadRes = await uploadFile(item.file);
+
+      const statusUpper = String(uploadRes.status || '').toUpperCase();
+      const terminalStatuses = ['PROCESSED', 'NEEDS_REVIEW', 'DUPLICATE', 'UNSUPPORTED', 'FAILED'];
+
+      // If backend responded with terminal state directly (synchronous processing)
+      if (terminalStatuses.includes(statusUpper)) {
+        applyFinalResult(uploadRes);
+        return;
+      }
+
+      // 2. Real status polling if document is still processing in background
+      const docId = uploadRes.document_id || uploadRes.id;
+      if (!docId) {
+        applyFinalResult(uploadRes);
+        return;
+      }
+
+      let attempts = 0;
+      const maxAttempts = 60; // 30 seconds polling window
+      const pollTimer = setInterval(async () => {
+        attempts++;
+        try {
+          const statusRes = await getDocumentStatus(docId);
+          const curStatus = String(statusRes.status || '').toUpperCase();
+          const curStage = String(statusRes.stage || '').toUpperCase();
+
+          let stageText = 'Processing document...';
+          let derivedStatus: UploadItem['status'] = 'uploading';
+
+          if (curStage === 'READING_WORKBOOK') {
+            stageText = 'Reading workbook...';
+            derivedStatus = 'uploading';
+          } else if (curStage === 'DETECTING_STRUCTURE') {
+            stageText = 'Detecting invoice structure...';
+            derivedStatus = 'extracting';
+          } else if (curStage === 'EXTRACTING_DATA') {
+            stageText = 'Extracting line items & invoice fields...';
+            derivedStatus = 'extracting';
+          } else if (curStage === 'VALIDATING_TOTALS') {
+            stageText = 'Validating totals & calculations...';
+            derivedStatus = 'validating';
+          } else if (curStage === 'CHECKING_DUPLICATES') {
+            stageText = 'Checking duplicate records...';
+            derivedStatus = 'validating';
+          } else if (curStage === 'TEXT_EXTRACTION') {
+            stageText = 'Extracting document text & OCR...';
+            derivedStatus = 'extracting';
+          } else if (curStage === 'DOCUMENT_TYPE_DETECTION') {
+            stageText = 'Detecting document type...';
+            derivedStatus = 'extracting';
+          } else if (curStage === 'AI_EXTRACTION') {
+            stageText = 'AI extracting invoice metadata...';
+            derivedStatus = 'extracting';
+          }
+
+          if (terminalStatuses.includes(curStatus)) {
+            clearInterval(pollTimer);
+            applyFinalResult(statusRes);
+          } else {
+            setItems(curr =>
+              curr.map(i =>
+                i.id === item.id
+                  ? {
+                      ...i,
+                      status: derivedStatus,
+                      stageText,
+                      backendStage: curStage,
+                    }
+                  : i
+              )
+            );
+          }
+        } catch (pollErr) {
+          // Keep polling if an individual poll request drops
+        }
+
+        if (attempts >= maxAttempts) {
+          clearInterval(pollTimer);
+          setItems(curr =>
+            curr.map(i =>
+              i.id === item.id &&
+              (i.status === 'uploading' || i.status === 'extracting' || i.status === 'validating')
+                ? {
+                    ...i,
+                    status: 'failed',
+                    stageText: 'Processing timed out',
+                    error: 'Document processing took longer than expected. Please try again.',
+                  }
+                : i
+            )
+          );
+        }
+      }, 500);
+    } catch (err: any) {
       const errorMessage =
         err?.message || 'Processing failed. If the server is waking up, please wait a moment and try again.';
 
@@ -239,7 +302,10 @@ export default function Upload() {
           multiple
           accept="application/pdf,image/jpeg,image/png,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/csv,.xlsx,.xls,.csv"
           className="hidden"
-          onChange={e => handleFileSelection(e.target.files)}
+          onChange={e => {
+            handleFileSelection(e.target.files);
+            e.target.value = '';
+          }}
           aria-label="Upload invoice documents"
         />
 
@@ -269,7 +335,9 @@ export default function Upload() {
         <div className="mt-8 space-y-6">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-bold text-slate-800">
-              Processing Queue ({items.length} {items.length === 1 ? 'document' : 'documents'})
+              {items.some(i => i.status === 'uploading' || i.status === 'extracting' || i.status === 'validating')
+                ? `Processing Queue (${items.length} ${items.length === 1 ? 'document' : 'documents'})`
+                : `Uploaded Documents (${items.length} ${items.length === 1 ? 'document' : 'documents'})`}
             </h2>
             <button
               onClick={() => ref.current?.click()}
