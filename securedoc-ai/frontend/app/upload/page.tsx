@@ -715,53 +715,64 @@ export default function Upload() {
                     )}
 
                     {/* DUPLICATE DETECTED STATE */}
-                    {item.status === 'duplicate' && item.result && (
-                      <div className="space-y-4 animate-pop-in">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-rose-600 font-bold text-base">
-                            <Copy size={22} className="text-rose-500" />
-                            <span>Possible Duplicate Detected</span>
+                    {item.status === 'duplicate' && item.result && (() => {
+                      const existingInvId = item.result.duplicate_of || item.result.existing_invoice_id || item.result.duplicate_invoice_id;
+                      const hasValidExistingInvoice = !!existingInvId && Number(existingInvId) > 0;
+                      const dupInvoiceNumber = item.result.duplicate_invoice_number || item.result.invoice_number;
+                      const hasDupInvoiceNumber = !!dupInvoiceNumber && String(dupInvoiceNumber).trim().length > 0 && String(dupInvoiceNumber).toLowerCase() !== 'unknown' && String(dupInvoiceNumber).toLowerCase() !== 'n/a';
+
+                      return (
+                        <div className="space-y-4 animate-pop-in">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-rose-600 font-bold text-base">
+                              <Copy size={22} className="text-rose-500" />
+                              <span>Possible Duplicate Detected</span>
+                            </div>
+                            <Badge tone="red">DUPLICATE</Badge>
                           </div>
-                          <Badge tone="red">DUPLICATE</Badge>
-                        </div>
 
-                        <div className="bg-rose-50/70 border border-rose-200 rounded-2xl p-4 text-xs text-rose-900 space-y-1.5">
-                          <p className="font-bold text-rose-800">
-                            Invoice #{item.result.invoice_number} matches an existing record in your organization.
-                          </p>
-                          {item.result.duplicate_vendor && (
-                            <p>Existing Vendor: {item.result.duplicate_vendor}</p>
-                          )}
-                          {item.result.duplicate_total !== undefined && (
-                            <p>Existing Amount: {item.result.currency} {Number(item.result.duplicate_total).toFixed(2)}</p>
-                          )}
-                        </div>
+                          <div className="bg-rose-50/70 border border-rose-200 rounded-2xl p-4 text-xs text-rose-900 space-y-1.5">
+                            <p className="font-bold text-rose-800">
+                              {hasDupInvoiceNumber
+                                ? `Invoice #${dupInvoiceNumber} matches an existing record in your organization.`
+                                : `An identical invoice file or record matches an existing invoice in your organization.`}
+                            </p>
+                            {item.result.duplicate_vendor && (
+                              <p>Existing Vendor: {item.result.duplicate_vendor}</p>
+                            )}
+                            {item.result.duplicate_total !== undefined && item.result.duplicate_total !== null && !isNaN(Number(item.result.duplicate_total)) && (
+                              <p>Existing Amount: {item.result.currency || 'USD'} {Number(item.result.duplicate_total).toFixed(2)}</p>
+                            )}
+                          </div>
 
-                        {/* Actions */}
-                        <div className="flex flex-wrap items-center gap-3 pt-2">
-                          {item.result.duplicate_of && (
-                            <Link
-                              href={`/invoices/${item.result.duplicate_of}`}
-                              className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 transition"
+                          {/* Actions */}
+                          <div className="flex flex-wrap items-center gap-3 pt-2">
+                            {hasValidExistingInvoice && (
+                              <Link
+                                href={`/invoices/${existingInvId}`}
+                                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 transition"
+                              >
+                                View Existing Invoice <ArrowRight size={16} />
+                              </Link>
+                            )}
+                            {item.result.id && Number(item.result.id) > 0 && (
+                              <Link
+                                href={`/invoices/${item.result.id}`}
+                                className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition"
+                              >
+                                Review Anyway
+                              </Link>
+                            )}
+                            <button
+                              onClick={() => ref.current?.click()}
+                              className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition"
                             >
-                              View Existing Invoice <ArrowRight size={16} />
-                            </Link>
-                          )}
-                          <Link
-                            href={`/invoices/${item.result.id}`}
-                            className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition"
-                          >
-                            Review Anyway
-                          </Link>
-                          <button
-                            onClick={() => ref.current?.click()}
-                            className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition"
-                          >
-                            Upload Another
-                          </button>
+                              Upload Another
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
 
                     {/* UNSUPPORTED DOCUMENT STATE */}
                     {item.status === 'unsupported' && (

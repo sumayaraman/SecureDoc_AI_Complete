@@ -1,4 +1,4 @@
-import os, hashlib, csv, io, re
+import os, hashlib, csv, io, re, uuid
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -73,32 +73,7 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
     data=await file.read()
     if len(data)>MAX: raise HTTPException(413,'Maximum file size is 10 MB')
     digest=hashlib.sha256(data).hexdigest()
-    existing=db.query(Document).filter_by(organization_id=m.organization_id,file_hash=digest).first()
-    if existing:
-        existing_inv = db.query(Invoice).filter_by(document_id=existing.id).first()
-        job = db.query(ProcessingJob).filter_by(document_id=existing.id).order_by(ProcessingJob.created_at.desc()).first()
-        return {
-            'status': 'DUPLICATE',
-            'duplicate': True,
-            'id': existing_inv.id if existing_inv else existing.id,
-            'document_id': existing.id,
-            'processing_job_id': job.id if job else None,
-            'filename': existing.filename,
-            'document_type': 'excel_invoice' if suffix in ('.xlsx', '.xls') else 'invoice',
-            'invoice_number': existing_inv.invoice_number if existing_inv else None,
-            'vendor': existing_inv.vendor_name if existing_inv else None,
-            'amount': float(existing_inv.total or 0) if existing_inv else 0.0,
-            'currency': existing_inv.currency if existing_inv else 'USD',
-            'invoice_id': existing_inv.id if existing_inv else None,
-            'duplicate_of': existing_inv.id if existing_inv else existing.id,
-            'duplicate_invoice_number': existing_inv.invoice_number if existing_inv else None,
-            'duplicate_vendor': existing_inv.vendor_name if existing_inv else None,
-            'duplicate_total': float(existing_inv.total or 0) if existing_inv else None,
-            'duplicate_date': existing_inv.invoice_date if existing_inv else None,
-            'message': f'Exact duplicate file already exists in your workspace: {existing.filename}',
-            'created_at': existing.created_at.isoformat()
-        }
-    key=f'{m.organization_id}/{digest}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
+    key=f'{m.organization_id}/{digest}_{uuid.uuid4().hex[:8]}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
     is_excel = suffix in ('.xlsx', '.xls')
     initial_stage = 'READING_WORKBOOK' if is_excel else 'TEXT_EXTRACTION'
     doc=Document(organization_id=m.organization_id,filename=file.filename or 'document',mime_type=file.content_type,storage_key=key,file_hash=digest,status='PROCESSING')
@@ -192,16 +167,42 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
         if review_reasons:
             inv.status = 'NEEDS_REVIEW'
 
+        # DUPLICATE DETECTION — ONLY FOR VERIFIED INVOICES
         job.stage = 'CHECKING_DUPLICATES'
         db.commit()
         dup = None
-        if inv.invoice_number and inv.invoice_number.lower() not in ('unknown', 'n/a', 'none', ''):
-            dup=db.query(Invoice).filter(Invoice.organization_id==m.organization_id,Invoice.invoice_number==inv.invoice_number,Invoice.id!=inv.id).first()
-            if dup:
-                inv.duplicate=True
-                inv.status='DUPLICATE'
 
-        doc.status=inv.status; job.stage='COMPLETED'; job.status='COMPLETED'; job.completed_at=datetime.utcnow()
+        # 1. Exact file hash duplicate matching an existing INVOICE in this organization
+        existing_doc = db.query(Document).filter(
+            Document.organization_id == m.organization_id,
+            Document.file_hash == digest,
+            Document.id != doc.id
+        ).order_by(Document.created_at.desc()).first()
+        if existing_doc:
+            existing_inv = db.query(Invoice).filter(
+                Invoice.organization_id == m.organization_id,
+                Invoice.document_id == existing_doc.id,
+                Invoice.id != inv.id
+            ).first()
+            if existing_inv:
+                dup = existing_inv
+
+        # 2. Invoice number duplicate (ONLY for non-empty, non-trivial invoice numbers)
+        raw_inv_num = (inv.invoice_number or '').strip()
+        if not dup and raw_inv_num and len(raw_inv_num) >= 3 and raw_inv_num.lower() not in ('unknown', 'n/a', 'none', 'null', 'undefined', 'no_invoice_num'):
+            existing_inv = db.query(Invoice).filter(
+                Invoice.organization_id == m.organization_id,
+                Invoice.invoice_number == raw_inv_num,
+                Invoice.id != inv.id
+            ).first()
+            if existing_inv:
+                dup = existing_inv
+
+        if dup:
+            inv.duplicate = True
+            inv.status = 'DUPLICATE'
+
+        doc.status = inv.status; job.stage = 'COMPLETED'; job.status = 'COMPLETED'; job.completed_at = datetime.utcnow()
         db.add(Notification(organization_id=m.organization_id,user_id=u.id,title='Invoice processed',message=f'{doc.filename} is ready for review.')); db.commit()
         audit(db,m.organization_id,u.id,'UPLOAD_PROCESS','invoice:'+str(inv.id))
         
@@ -217,7 +218,10 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
             'review_reasons': review_reasons,
             'validation': {'valid': vr.valid, 'difference': float(vr.difference), 'message': vr.message},
             'items': items_serialized,
+            'duplicate': inv.duplicate,
             'duplicate_of': dup.id if dup else None,
+            'existing_invoice_id': dup.id if dup else None,
+            'duplicate_invoice_id': dup.id if dup else None,
             'duplicate_invoice_number': dup.invoice_number if dup else None,
             'duplicate_vendor': dup.vendor_name if dup else None,
             'duplicate_total': float(dup.total or 0) if dup else None,
@@ -270,6 +274,36 @@ def document_status(document_id:int,authorization:str|None=Header(None),db:Sessi
         items = db.query(InvoiceItem).filter_by(invoice_id=inv.id).all()
         res['validation'] = {'valid': vr.valid, 'difference': float(vr.difference), 'message': vr.message} if vr else None
         res['items'] = [{'id': x.id, 'description': x.description, 'quantity': float(x.quantity), 'unit_price': float(x.unit_price), 'total': float(x.total)} for x in items]
+        if inv.duplicate:
+            dup = None
+            raw_inv_num = (inv.invoice_number or '').strip()
+            if raw_inv_num and len(raw_inv_num) >= 3 and raw_inv_num.lower() not in ('unknown', 'n/a', 'none', 'null', 'undefined', 'no_invoice_num'):
+                dup = db.query(Invoice).filter(
+                    Invoice.organization_id == m.organization_id,
+                    Invoice.invoice_number == raw_inv_num,
+                    Invoice.id != inv.id
+                ).first()
+            if not dup:
+                existing_doc = db.query(Document).filter(
+                    Document.organization_id == m.organization_id,
+                    Document.file_hash == doc.file_hash,
+                    Document.id != doc.id
+                ).order_by(Document.created_at.desc()).first()
+                if existing_doc:
+                    dup = db.query(Invoice).filter(
+                        Invoice.organization_id == m.organization_id,
+                        Invoice.document_id == existing_doc.id,
+                        Invoice.id != inv.id
+                    ).first()
+            if dup:
+                res['duplicate'] = True
+                res['duplicate_of'] = dup.id
+                res['existing_invoice_id'] = dup.id
+                res['duplicate_invoice_id'] = dup.id
+                res['duplicate_invoice_number'] = dup.invoice_number
+                res['duplicate_vendor'] = dup.vendor_name
+                res['duplicate_total'] = float(dup.total or 0)
+                res['duplicate_date'] = dup.invoice_date
     elif doc.status == 'UNSUPPORTED':
         res['document_type'] = 'unsupported_spreadsheet' if doc.filename.endswith(('.xlsx', '.xls')) else 'unsupported'
         res['message'] = error_msg or "This file could not be identified as an invoice."
