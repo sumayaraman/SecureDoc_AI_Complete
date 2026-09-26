@@ -11,7 +11,7 @@ from app.database.db import get_db
 from app.models.entities import *
 from app.security.auth import hash_password, verify_password, make_token, current_context, require_role
 from app.services.ai import AIService
-from app.services.extractor import extract_text
+from app.services.extractor import extract_text, classify_document
 from app.services.validation import validate_invoice
 
 router=APIRouter(); STORAGE=Path(os.getenv('STORAGE_DIR','./storage')).resolve(); STORAGE.mkdir(parents=True,exist_ok=True)
@@ -65,7 +65,24 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
     suffix=Path(file.filename or 'document').suffix.lower(); key=f'{m.organization_id}/{digest}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
     doc=Document(organization_id=m.organization_id,filename=file.filename or 'document',mime_type=file.content_type,storage_key=key,file_hash=digest,status='PROCESSING'); db.add(doc); db.flush(); job=ProcessingJob(document_id=doc.id,status='PROCESSING',stage='TEXT_EXTRACTION'); db.add(job); db.commit()
     try:
-        text=extract_text(str(path),file.content_type); doc.extracted_text=text[:200000]; job.stage='AI_EXTRACTION'
+        text=extract_text(str(path),file.content_type); doc.extracted_text=text[:200000]
+        classification = classify_document(text, file.filename or 'document')
+        if not classification['is_supported']:
+            doc.status = 'UNSUPPORTED'
+            job.stage = 'DOCUMENT_TYPE_DETECTION'
+            job.status = 'FAILED'
+            job.error_message = classification.get('reason', 'Unsupported document type')
+            db.commit()
+            return {
+                'status': 'UNSUPPORTED',
+                'document_id': doc.id,
+                'filename': doc.filename,
+                'document_type': classification.get('doc_type', 'unsupported'),
+                'message': classification.get('reason', "We couldn't identify this file as a supported invoice or receipt."),
+                'created_at': doc.created_at.isoformat()
+            }
+
+        job.stage='AI_EXTRACTION'
         result=validate_result_payload(await AIService().extract_invoice(text,file.filename or 'invoice'))
         job.stage='VALIDATION'
         validation=validate_invoice(result.get('items',[]),Decimal(str(result.get('subtotal',0))),Decimal(str(result.get('discount',0))),Decimal(str(result.get('tax',0))),Decimal(str(result.get('total',0))))
@@ -74,13 +91,49 @@ async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),d
             try: db.add(InvoiceItem(invoice_id=inv.id,description=str(item.get('description','Unknown item'))[:500],quantity=float(item.get('quantity',0) or 0),unit_price=float(item.get('unit_price',0) or 0),total=float(item.get('total',0) or 0)))
             except Exception: pass
         vr=ValidationResult(invoice_id=inv.id,valid=validation['valid'],difference=float(validation['difference']),message='Validated successfully' if validation['valid'] else 'Calculation mismatch requires review'); db.add(vr); inv.validation_difference=float(validation['difference'])
-        if not text.strip(): inv.status='NEEDS_REVIEW'
-        if not validation['valid'] or inv.confidence<85: inv.status='NEEDS_REVIEW'
+        
+        review_reasons = []
+        if not text.strip():
+            review_reasons.append('No text extracted (scanned or image quality low)')
+        if not validation['valid']:
+            review_reasons.append(f'Calculation mismatch of {validation["difference"]} {inv.currency or "BDT"}')
+        if inv.confidence < 85:
+            review_reasons.append(f'Extraction confidence is {inv.confidence:.0f}% (below 85% threshold)')
+        if not inv.invoice_number:
+            review_reasons.append('Missing invoice number')
+        if not inv.vendor_name or inv.vendor_name.lower() in ('unknown vendor', 'unknown'):
+            review_reasons.append('Vendor name could not be identified with certainty')
+            
+        if review_reasons:
+            inv.status = 'NEEDS_REVIEW'
+
         dup=db.query(Invoice).filter(Invoice.organization_id==m.organization_id,Invoice.invoice_number==inv.invoice_number,Invoice.id!=inv.id).first()
-        if dup: inv.duplicate=True; inv.status='DUPLICATE'
-        doc.status=inv.status; job.stage='COMPLETED'; job.status='COMPLETED'; job.completed_at=datetime.utcnow(); db.add(Notification(organization_id=m.organization_id,user_id=u.id,title='Invoice processed',message=f'{doc.filename} is ready for review.')); db.commit(); audit(db,m.organization_id,u.id,'UPLOAD_PROCESS','invoice:'+str(inv.id)); return serialize_invoice(inv,doc)
+        if dup:
+            inv.duplicate=True
+            inv.status='DUPLICATE'
+
+        doc.status=inv.status; job.stage='COMPLETED'; job.status='COMPLETED'; job.completed_at=datetime.utcnow()
+        db.add(Notification(organization_id=m.organization_id,user_id=u.id,title='Invoice processed',message=f'{doc.filename} is ready for review.')); db.commit()
+        audit(db,m.organization_id,u.id,'UPLOAD_PROCESS','invoice:'+str(inv.id))
+        
+        items_serialized = [{'id':x.id,'description':x.description,'quantity':float(x.quantity),'unit_price':float(x.unit_price),'total':float(x.total)} for x in db.query(InvoiceItem).filter_by(invoice_id=inv.id).all()]
+        
+        return {
+            **serialize_invoice(inv,doc),
+            'invoice_id': inv.id,
+            'document_type': classification.get('doc_type', 'invoice'),
+            'review_reasons': review_reasons,
+            'validation': {'valid': vr.valid, 'difference': float(vr.difference), 'message': vr.message},
+            'items': items_serialized,
+            'duplicate_of': dup.id if dup else None,
+            'duplicate_invoice_number': dup.invoice_number if dup else None,
+            'duplicate_vendor': dup.vendor_name if dup else None,
+            'duplicate_total': float(dup.total or 0) if dup else None,
+            'duplicate_date': dup.invoice_date if dup else None,
+            'processing': {'status': job.status, 'stage': job.stage, 'error': job.error_message}
+        }
     except Exception as e:
-        db.rollback(); doc=db.get(Document,doc.id); job=db.get(ProcessingJob,job.id); doc.status='FAILED'; job.status='FAILED'; job.stage='FAILED'; job.error_message=str(e)[:500]; db.commit(); raise HTTPException(500,'Document processing failed')
+        db.rollback(); doc=db.get(Document,doc.id); job=db.get(ProcessingJob,job.id); doc.status='FAILED'; job.status='FAILED'; job.stage='FAILED'; job.error_message=str(e)[:500]; db.commit(); raise HTTPException(500,f'Document processing failed: {str(e)[:200]}')
 
 @router.get('/documents')
 def documents(q:str|None=None,status:str|None=None,authorization:str|None=Header(None),db:Session=Depends(get_db)):
