@@ -40,33 +40,7 @@ interface UploadItem {
     | 'failed';
   stageText: string;
   error?: string;
-  result?: {
-    id: number;
-    invoice_id?: number;
-    document_id?: number;
-    invoice_number?: string;
-    vendor?: string;
-    date?: string;
-    due_date?: string;
-    amount: number;
-    subtotal: number;
-    discount: number;
-    tax: number;
-    currency: string;
-    status: string;
-    confidence: number;
-    document_type?: string;
-    review_reasons?: string[];
-    duplicate?: boolean;
-    duplicate_of?: number;
-    duplicate_invoice_number?: string;
-    duplicate_vendor?: string;
-    duplicate_total?: number;
-    validation?: { valid: boolean; difference: number; message: string };
-    items?: Array<{ id: number; description: string; quantity: number; unit_price: number; total: number }>;
-    message?: string;
-    details?: string;
-  };
+  result?: any;
 }
 
 export default function Upload() {
@@ -121,8 +95,8 @@ export default function Upload() {
 
   async function executeUpload(item: UploadItem) {
     // Step simulation in parallel with real backend processing
-    let timer1: NodeJS.Timeout;
-    let timer2: NodeJS.Timeout;
+    let timer1: any;
+    let timer2: any;
 
     timer1 = setTimeout(() => {
       setItems(curr =>
