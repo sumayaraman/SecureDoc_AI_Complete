@@ -17,6 +17,7 @@ import {
   FileX,
   ChevronDown,
   ChevronUp,
+  FileSpreadsheet,
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -26,6 +27,7 @@ interface UploadItem {
   previewUrl: string;
   isPdf: boolean;
   isImage: boolean;
+  isExcel: boolean;
   status:
     | 'selected'
     | 'uploading'
@@ -85,8 +87,17 @@ export default function Upload() {
   function handleFileSelection(files: FileList | null) {
     if (!files || files.length === 0) return;
     const newItems: UploadItem[] = Array.from(files).map((file, idx) => {
-      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-      const isImage = file.type.startsWith('image/');
+      const ext = file.name.toLowerCase();
+      const isPdf = file.type === 'application/pdf' || ext.endsWith('.pdf');
+      const isImage = file.type.startsWith('image/') || ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png');
+      const isExcel =
+        ext.endsWith('.xlsx') ||
+        ext.endsWith('.xls') ||
+        ext.endsWith('.csv') ||
+        file.type.includes('spreadsheet') ||
+        file.type.includes('excel') ||
+        file.type === 'text/csv' ||
+        file.type === 'application/csv';
       const previewUrl = URL.createObjectURL(file);
       return {
         id: `${Date.now()}-${idx}-${file.name}`,
@@ -94,8 +105,9 @@ export default function Upload() {
         previewUrl,
         isPdf,
         isImage,
+        isExcel,
         status: 'uploading',
-        stageText: 'Uploading & securing document...',
+        stageText: isExcel ? 'Uploading & parsing spreadsheet...' : 'Uploading & securing document...',
       };
     });
 
@@ -116,7 +128,13 @@ export default function Upload() {
       setItems(curr =>
         curr.map(i =>
           i.id === item.id && (i.status === 'uploading' || i.status === 'extracting')
-            ? { ...i, status: 'extracting', stageText: 'Extracting text and OCR...' }
+            ? {
+                ...i,
+                status: 'extracting',
+                stageText: i.isExcel
+                  ? 'Extracting sheets, rows & cell data...'
+                  : 'Extracting text and OCR...',
+              }
             : i
         )
       );
@@ -191,7 +209,7 @@ export default function Upload() {
           ? {
               ...i,
               status: 'uploading',
-              stageText: 'Uploading & securing document...',
+              stageText: item.isExcel ? 'Uploading & parsing spreadsheet...' : 'Uploading & securing document...',
               error: undefined,
             }
           : i
@@ -239,7 +257,7 @@ export default function Upload() {
           ref={ref}
           type="file"
           multiple
-          accept="application/pdf,image/jpeg,image/png"
+          accept="application/pdf,image/jpeg,image/png,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/csv,.xlsx,.xls,.csv"
           className="hidden"
           onChange={e => handleFileSelection(e.target.files)}
           aria-label="Upload invoice documents"
@@ -256,7 +274,7 @@ export default function Upload() {
         <p className="mt-4 font-bold text-slate-800 text-base">
           {isDragging ? 'Release to upload invoices' : 'Drop invoices here or browse'}
         </p>
-        <p className="mt-1 text-sm text-slate-500">Supports PDF, JPG, and PNG files up to 10 MB</p>
+        <p className="mt-1 text-sm text-slate-500">Supports PDF, JPG, PNG, Excel (.xlsx, .xls) and CSV files up to 10 MB</p>
 
         <button
           onClick={() => ref.current?.click()}
@@ -298,14 +316,27 @@ export default function Upload() {
                     <div>
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 overflow-hidden">
-                          <FileText size={18} className="text-indigo-600 shrink-0" />
+                          {item.isExcel ? (
+                            <FileSpreadsheet size={18} className="text-emerald-600 shrink-0" />
+                          ) : (
+                            <FileText size={18} className="text-indigo-600 shrink-0" />
+                          )}
                           <p className="text-sm font-semibold text-slate-800 truncate" title={item.file.name}>
                             {item.file.name}
                           </p>
                         </div>
                       </div>
                       <p className="text-xs text-slate-400 mt-1">
-                        {(item.file.size / 1024).toFixed(0)} KB • {item.isPdf ? 'PDF' : item.isImage ? 'Image' : 'File'}
+                        {(item.file.size / 1024).toFixed(0)} KB •{' '}
+                        {item.isPdf
+                          ? 'PDF'
+                          : item.isImage
+                          ? 'Image'
+                          : item.isExcel
+                          ? item.file.name.toLowerCase().endsWith('.csv')
+                            ? 'CSV'
+                            : 'Excel'
+                          : 'Document'}
                       </p>
 
                       {/* Visual Preview */}
@@ -317,6 +348,16 @@ export default function Upload() {
                               alt={item.file.name}
                               className="max-h-full max-w-full object-contain"
                             />
+                          </div>
+                        ) : item.isExcel ? (
+                          <div className="h-48 w-full rounded-xl border border-emerald-200/80 bg-emerald-50/50 p-4 flex flex-col items-center justify-center text-center">
+                            <div className="h-12 w-12 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center mb-2 shadow-sm">
+                              <FileSpreadsheet size={28} />
+                            </div>
+                            <span className="text-xs font-semibold text-emerald-950">
+                              {item.file.name.toLowerCase().endsWith('.csv') ? 'CSV Spreadsheet' : 'Excel Spreadsheet'}
+                            </span>
+                            <span className="text-[11px] text-emerald-700/80 mt-0.5">Rows & line items detected</span>
                           </div>
                         ) : (
                           <div className="h-48 w-full rounded-xl border border-slate-200 bg-white p-4 flex flex-col items-center justify-center text-center">
@@ -412,7 +453,7 @@ export default function Upload() {
                                   : 'text-slate-700 font-medium'
                               }
                             >
-                              Text extraction & OCR scanning
+                              {item.isExcel ? 'Spreadsheet rows & cell data extraction' : 'Text extraction & OCR scanning'}
                             </span>
                           </div>
 

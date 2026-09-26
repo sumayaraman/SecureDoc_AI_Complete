@@ -15,7 +15,17 @@ from app.services.extractor import extract_text, classify_document
 from app.services.validation import validate_invoice
 
 router=APIRouter(); STORAGE=Path(os.getenv('STORAGE_DIR','./storage')).resolve(); STORAGE.mkdir(parents=True,exist_ok=True)
-ALLOWED={'application/pdf','image/jpeg','image/png'}; MAX=10*1024*1024
+ALLOWED={
+    'application/pdf',
+    'image/jpeg',
+    'image/png',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel',
+    'text/csv',
+    'application/csv',
+    'text/plain',
+    'application/octet-stream',
+}; ALLOWED_EXT={'.pdf','.jpg','.jpeg','.png','.xlsx','.xls','.csv'}; MAX=10*1024*1024
 class Register(BaseModel): name:str; email:EmailStr; password:str; organization_name:str='My Organization'
 class Login(BaseModel): email:EmailStr; password:str
 class AssistantQuery(BaseModel): question:str
@@ -57,15 +67,16 @@ def me(authorization:str|None=Header(None),db:Session=Depends(get_db)):
 @router.post('/documents/upload')
 async def upload(file:UploadFile=File(...),authorization:str|None=Header(None),db:Session=Depends(get_db)):
     u,m=current_context(db,authorization); require_role(m,'owner','admin','member')
-    if file.content_type not in ALLOWED: raise HTTPException(400,'Only PDF, JPG and PNG files are supported')
+    suffix=Path(file.filename or 'document').suffix.lower()
+    if file.content_type not in ALLOWED and suffix not in ALLOWED_EXT: raise HTTPException(400,'Only PDF, JPG, PNG, Excel (.xlsx, .xls) and CSV files are supported')
     data=await file.read()
     if len(data)>MAX: raise HTTPException(413,'Maximum file size is 10 MB')
     digest=hashlib.sha256(data).hexdigest(); existing=db.query(Document).filter_by(organization_id=m.organization_id,file_hash=digest).first()
     if existing: raise HTTPException(409,'This file already exists in the workspace')
-    suffix=Path(file.filename or 'document').suffix.lower(); key=f'{m.organization_id}/{digest}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
+    key=f'{m.organization_id}/{digest}{suffix}'; path=safe_path(key); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
     doc=Document(organization_id=m.organization_id,filename=file.filename or 'document',mime_type=file.content_type,storage_key=key,file_hash=digest,status='PROCESSING'); db.add(doc); db.flush(); job=ProcessingJob(document_id=doc.id,status='PROCESSING',stage='TEXT_EXTRACTION'); db.add(job); db.commit()
     try:
-        text=extract_text(str(path),file.content_type); doc.extracted_text=text[:200000]
+        text=extract_text(str(path),file.content_type,file.filename or 'document'); doc.extracted_text=text[:200000]
         classification = classify_document(text, file.filename or 'document')
         if not classification['is_supported']:
             doc.status = 'UNSUPPORTED'
